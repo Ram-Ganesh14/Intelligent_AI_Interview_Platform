@@ -1,0 +1,109 @@
+{
+  "session_id": "sess_20260301_001",
+  "candidate": {
+    "name": "Raj Sharma",
+    "email": "raj.sharma@email.com",
+    "role": "Backend Engineer",
+    "experience_years": 4
+  },
+  "session": {
+    "date": "2026-03-01T10:00:00Z",
+    "duration_minutes": 38,
+    "difficulty_range": "MID → SENIOR",
+    "questions_asked": 5,
+    "questions_answered": 5
+  },
+  "scores": {
+    "overall": 78,
+    "dimensions": {
+      "technical_accuracy": {"score": 82, "weight": 0.40, "contribution": 32.8},
+      "problem_solving": {"score": 75, "weight": 0.20, "contribution": 15.0},
+      "communication": {"score": 80, "weight": 0.15, "contribution": 12.0},
+      "behavioral_soft_skills": {"score": 72, "weight": 0.15, "contribution": 10.8},
+      "code_quality": {"score": 68, "weight": 0.10, "contribution": 6.8}
+    },
+    "confidence_interval": [73, 83],
+    "shap_contributions": {
+      "technical": 0.42,
+      "problem_solving": 0.22,
+      "communication": 0.17,
+      "behavioral": 0.12,
+      "code_quality": 0.07
+    }
+  },
+  "per_question": [
+    {
+      "question_id": "q001",
+      "format": "text",
+      "topic": "Python",
+      "difficulty": 2,
+      "scores": {"correctness": 4.5, "completeness": 4.0, "communication": 3.8},
+      "final_score": 8,
+      "rationale": "Accurate explanation of generators vs lists with lazy evaluation concept.",
+      "flags": []
+    },
+    {
+      "question_id": "q005",
+      "format": "code",
+      "topic": "Algorithms",
+      "difficulty": 3,
+      "scores": {"correctness": 4.2, "efficiency": 3.5, "style": 3.8},
+      "final_score": 7,
+      "rationale": "Correct hash map approach. O(n) time. Minor style issues.",
+      "flags": []
+    },
+    {
+      "question_id": "q040",
+      "format": "text",
+      "topic": "Behavioral",
+      "difficulty": 2,
+      "scores": {"structure": 3.0, "depth": 2.8, "self_awareness": 3.5},
+      "final_score": 6,
+      "rationale": "Addressed situation but lacked depth. Missing concrete outcome.",
+      "flags": ["LOW_DEPTH"]
+    },
+    {
+      "question_id": "q011",
+      "format": "text",
+      "topic": "System Design",
+      "difficulty": 4,
+      "scores": {"architecture": 4.8, "scalability": 4.5, "tradeoffs": 4.2},
+      "final_score": 9,
+      "rationale": "Excellent design covering hashing, DB choice, caching, analytics.",
+      "flags": []
+    },
+    {
+      "question_id": "q009",
+      "format": "code",
+      "topic": "Data Structures",
+      "difficulty": 4,
+      "scores": {"correctness": 2.5, "completeness": 2.0, "efficiency": 3.0},
+      "final_score": 5,
+      "rationale": "Passed 6/10 tests. Failed edge cases for empty input and capacity overflow.",
+      "evidence": {"failed_tests": ["empty_cache", "capacity_overflow"], "complexity": "O(n)"},
+      "flags": ["INCOMPLETE", "FAILED_EDGE_CASE"]
+    }
+  ],
+  "proctoring": {
+    "integrity_score": 95,
+    "gaze": {"on_screen_pct": 92, "off_screen_pct": 8, "integrity_flag": false},
+    "emotion": {"distribution": {"neutral": 55, "happy": 15, "surprised": 10, "fearful": 8, "sad": 5, "angry": 4, "disgusted": 3}, "stress_pct": 12, "stress_flag": false},
+    "tab_focus": {"switch_count": 1, "total_away_ms": 3200, "integrity_flag": false},
+    "face_verification": {"verified": true, "mismatches": 0},
+    "multi_person": {"incidents": 0, "coaching_flag": false},
+    "ai_detection": {"risk_score": 0.12, "flagged": false}
+  },
+  "contradictions": [
+    {
+      "claimed": "3+ years Kubernetes experience",
+      "demonstrated": "Could not explain basic pod scheduling",
+      "severity": "HIGH",
+      "recommendation": "Probe further or verify via reference check"
+    }
+  ],
+  "recommendations": {
+    "strengths": ["System Design", "Python fundamentals", "Communication"],
+    "weaknesses": ["LRU Cache implementation", "Behavioral depth", "Kubernetes"],
+    "suggested_focus": ["Data structure edge cases", "STAR format for behavioral", "Kubernetes hands-on"]
+  }
+}
