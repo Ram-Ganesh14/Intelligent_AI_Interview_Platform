@@ -7,9 +7,12 @@ import {
     FiZap, FiClock, FiSend, FiCode, FiMessageSquare, FiMic,
     FiEye, FiSmile, FiShield, FiChevronRight,
     FiAlertTriangle, FiMonitor, FiCheckCircle, FiSkipForward,
-    FiTarget,
+    FiTarget, FiMaximize,
 } from "react-icons/fi";
-import { analyzeFrame, submitAnswer, detectContradictions } from "@/lib/api";
+import {
+    analyzeFrame, submitAnswer, detectContradictions,
+    logIntegrityEvent, startIntegritySession, endIntegritySession,
+} from "@/lib/api";
 
 /* ── Types ── */
 interface Question {
@@ -35,7 +38,12 @@ interface FocusEvent {
     ts: number;
     switchCount?: number;
     duration_ms?: number;
+    questionIndex?: number;
 }
+
+/* ── Constants ── */
+const MAX_STRIKES = 3;
+const TERMINATION_DELAY_MS = 3500;
 
 /* ── Main Component ── */
 export default function InterviewPage() {
@@ -66,8 +74,27 @@ export default function InterviewPage() {
     const [faceVerified, setFaceVerified] = useState(true);
     const [faceCount, setFaceCount] = useState(1);
 
+    // ── STRIKE SYSTEM STATE ──
+    const [strikes, setStrikes] = useState(0);
+    const [showWarningOverlay, setShowWarningOverlay] = useState(false);
+    const [showTerminationOverlay, setShowTerminationOverlay] = useState(false);
+    const [terminationCountdown, setTerminationCountdown] = useState(3.5);
+    const [lastSwitchTime, setLastSwitchTime] = useState<string>("");
+    const [lastSwitchQuestion, setLastSwitchQuestion] = useState(0);
+
+    // ── FULLSCREEN STATE ──
+    const [isFullscreen, setIsFullscreen] = useState(false);
+    const [showFullscreenGate, setShowFullscreenGate] = useState(true);
+    const [showFullscreenRestore, setShowFullscreenRestore] = useState(false);
+    const [fullscreenExits, setFullscreenExits] = useState(0);
+
+    // ── INTEGRITY SESSION ──
+    const [integritySessionId, setIntegritySessionId] = useState("");
+    const sessionStartTimeRef = useRef(Date.now());
+
     const switchCountRef = useRef(0);
     const focusLogRef = useRef<FocusEvent[]>([]);
+    const strikesRef = useRef(0);
 
     // Session ID from sessionStorage
     const [sessionId, setSessionId] = useState("");
@@ -75,6 +102,10 @@ export default function InterviewPage() {
     // Webcam ref
     const videoRef = useRef<HTMLVideoElement>(null);
     const isFirstFrame = useRef(true);
+
+    // Current question ref (for closures)
+    const currentQRef = useRef(0);
+    useEffect(() => { currentQRef.current = currentQ; }, [currentQ]);
 
     // Speech Recognition Setup
     useEffect(() => {
@@ -145,18 +176,70 @@ export default function InterviewPage() {
         setLoaded(true);
     }, []);
 
-    // ── Webcam + Frame Analysis (replaces Math.random() proctoring) ──
+    // ── Start integrity session ──
     useEffect(() => {
         if (!sessionId) return;
+        sessionStartTimeRef.current = Date.now();
+        startIntegritySession(sessionId, candidateName, role)
+            .then(data => {
+                if (data?.session_id) {
+                    setIntegritySessionId(data.session_id);
+                    sessionStorage.setItem("integritySessionId", data.session_id);
+                }
+            })
+            .catch(() => { /* non-fatal */ });
+    }, [sessionId, candidateName, role]);
 
-        // Start webcam
+    // ── FULLSCREEN ENFORCEMENT ──
+    const enterFullscreen = useCallback(async () => {
+        try {
+            await document.documentElement.requestFullscreen();
+            setIsFullscreen(true);
+            setShowFullscreenGate(false);
+            setShowFullscreenRestore(false);
+        } catch {
+            console.warn("Fullscreen request denied");
+        }
+    }, []);
+
+    useEffect(() => {
+        const handleFullscreenChange = () => {
+            const isFull = !!document.fullscreenElement;
+            setIsFullscreen(isFull);
+
+            if (!isFull && !showFullscreenGate) {
+                // Exited fullscreen mid-interview
+                setShowFullscreenRestore(true);
+                setFullscreenExits(prev => prev + 1);
+                setIntegrityScore(prev => Math.max(0, prev - 10));
+
+                // Log to integrity service
+                const elapsed = Math.floor((Date.now() - sessionStartTimeRef.current) / 1000);
+                if (integritySessionId) {
+                    logIntegrityEvent(
+                        integritySessionId,
+                        "fullscreen_exit",
+                        elapsed,
+                        currentQRef.current,
+                    );
+                }
+            }
+        };
+
+        document.addEventListener("fullscreenchange", handleFullscreenChange);
+        return () => document.removeEventListener("fullscreenchange", handleFullscreenChange);
+    }, [showFullscreenGate, integritySessionId]);
+
+    // ── Webcam + Frame Analysis ──
+    useEffect(() => {
+        if (!sessionId || showFullscreenGate) return;
+
         navigator.mediaDevices.getUserMedia({ video: true }).then(stream => {
             if (videoRef.current) videoRef.current.srcObject = stream;
         }).catch(() => {
             console.warn("Could not access webcam — proctoring will use fallback data");
         });
 
-        // Send frame every 3 seconds
         const interval = setInterval(async () => {
             if (!videoRef.current || videoRef.current.readyState < 2) return;
 
@@ -171,21 +254,23 @@ export default function InterviewPage() {
                 const result = await analyzeFrame(sessionId, b64, isFirstFrame.current);
                 isFirstFrame.current = false;
 
-                // Update proctoring sidebar
                 if (result.emotion) setEmotion(result.emotion.charAt(0).toUpperCase() + result.emotion.slice(1));
                 if (result.face_verified !== null) setFaceVerified(result.face_verified);
                 if (result.face_count !== undefined) setFaceCount(result.face_count);
 
-                // Infer gaze from emotion (if face detected = on screen)
-                setGazeStatus(result.face_verified !== false ? "ON_SCREEN" : "OFF_SCREEN");
+                // Gaze from new gaze tracker
+                if (result.gaze_direction) {
+                    setGazeStatus(result.gaze_direction === "ON_SCREEN" ? "ON_SCREEN" : "OFF_SCREEN");
+                } else {
+                    setGazeStatus(result.face_verified !== false ? "ON_SCREEN" : "OFF_SCREEN");
+                }
 
-                // Handle alerts
                 if (result.alerts && result.alerts.length > 0) {
                     for (const alert of result.alerts) {
                         if (alert === "IDENTITY_MISMATCH") {
                             setIntegrityScore(prev => Math.max(0, prev - 10));
                         }
-                        if (alert.startsWith("MULTIPLE_FACES")) {
+                        if (typeof alert === "string" && (alert.startsWith("MULTIPLE_FACES") || alert.startsWith("MULTIPLE_PERSONS"))) {
                             setIntegrityScore(prev => Math.max(0, prev - 15));
                         }
                     }
@@ -196,31 +281,77 @@ export default function InterviewPage() {
         }, 3000);
 
         return () => clearInterval(interval);
-    }, [sessionId]);
+    }, [sessionId, showFullscreenGate]);
 
     // Timer
     useEffect(() => {
-        if (!sessionActive || timeLeft <= 0) return;
+        if (!sessionActive || timeLeft <= 0 || showFullscreenGate) return;
         const t = setInterval(() => setTimeLeft((v) => v - 1), 1000);
         return () => clearInterval(t);
-    }, [sessionActive, timeLeft]);
+    }, [sessionActive, timeLeft, showFullscreenGate]);
 
-    // Tab Switch Detection
+    // ── TAB SWITCH DETECTION WITH STRIKE SYSTEM ──
     useEffect(() => {
+        if (showFullscreenGate) return;
+
         const handleVisibility = () => {
             const ts = Date.now();
             if (document.hidden) {
                 switchCountRef.current++;
+                strikesRef.current++;
+                const currentStrikes = strikesRef.current;
+
                 setTabSwitches(switchCountRef.current);
-                focusLogRef.current.push({ event: "TAB_HIDDEN", ts, switchCount: switchCountRef.current });
-                setIntegrityScore((prev) => Math.max(0, prev - 8));
+                setStrikes(currentStrikes);
+                setLastSwitchTime(new Date(ts).toLocaleTimeString());
+                setLastSwitchQuestion(currentQRef.current + 1);
+                setIntegrityScore((prev) => Math.max(0, prev - 20));
+
+                focusLogRef.current.push({
+                    event: "TAB_HIDDEN",
+                    ts,
+                    switchCount: switchCountRef.current,
+                    questionIndex: currentQRef.current,
+                });
+
+                // Log to integrity service
+                const elapsed = Math.floor((ts - sessionStartTimeRef.current) / 1000);
+                if (integritySessionId) {
+                    logIntegrityEvent(
+                        integritySessionId,
+                        "tab_switch",
+                        elapsed,
+                        currentQRef.current,
+                        { switchCount: switchCountRef.current },
+                    );
+                }
+
+                if (currentStrikes >= MAX_STRIKES) {
+                    // TERMINATION
+                    setShowTerminationOverlay(true);
+                } else {
+                    // Show warning
+                    setShowWarningOverlay(true);
+                }
             } else {
                 focusLogRef.current.push({ event: "TAB_VISIBLE", ts });
             }
         };
 
         const handleBlur = () => {
-            focusLogRef.current.push({ event: "WINDOW_BLUR", ts: Date.now() });
+            const ts = Date.now();
+            focusLogRef.current.push({ event: "WINDOW_BLUR", ts });
+
+            // Log focus loss to integrity service
+            const elapsed = Math.floor((ts - sessionStartTimeRef.current) / 1000);
+            if (integritySessionId) {
+                logIntegrityEvent(
+                    integritySessionId,
+                    "focus_loss",
+                    elapsed,
+                    currentQRef.current,
+                );
+            }
         };
 
         document.addEventListener("visibilitychange", handleVisibility);
@@ -229,7 +360,34 @@ export default function InterviewPage() {
             document.removeEventListener("visibilitychange", handleVisibility);
             window.removeEventListener("blur", handleBlur);
         };
-    }, []);
+    }, [showFullscreenGate, integritySessionId]);
+
+    // ── TERMINATION COUNTDOWN ──
+    useEffect(() => {
+        if (!showTerminationOverlay) return;
+
+        setTerminationCountdown(3.5);
+        const start = Date.now();
+        const interval = setInterval(() => {
+            const elapsed = (Date.now() - start) / 1000;
+            const remaining = Math.max(0, 3.5 - elapsed);
+            setTerminationCountdown(remaining);
+
+            if (remaining <= 0) {
+                clearInterval(interval);
+                // End integrity session
+                if (integritySessionId) {
+                    endIntegritySession(integritySessionId);
+                }
+                // Navigate to report
+                setSessionActive(false);
+                setShowTerminationOverlay(false);
+                setShowResults(true);
+            }
+        }, 100);
+
+        return () => clearInterval(interval);
+    }, [showTerminationOverlay, integritySessionId]);
 
     const formatTime = (s: number) => {
         const m = Math.floor(s / 60);
@@ -253,7 +411,6 @@ export default function InterviewPage() {
             const q = questions[currentQ];
             const answerText = currentMode === "code" ? answer : (answer || "Voice Answer Recorded");
 
-            // Call FastAPI for scoring + AI detection
             const result = await submitAnswer(
                 sessionId,
                 currentQ,
@@ -274,16 +431,15 @@ export default function InterviewPage() {
             if (currentQ < questions.length - 1) {
                 setCurrentQ((p) => p + 1);
             } else {
-                // Interview done — detect contradictions then show results
                 try {
                     await detectContradictions(sessionId);
                 } catch { /* non-fatal */ }
+                if (integritySessionId) endIntegritySession(integritySessionId);
                 setSessionActive(false);
                 setShowResults(true);
             }
         } catch (err) {
             console.error("Submit failed:", err);
-            // Fallback: still advance
             setSubmitted((prev) => ({ ...prev, [currentQ]: answer || "Voice Answer Recorded" }));
             setScores((prev) => ({ ...prev, [currentQ]: 5 }));
             setAnswer("");
@@ -296,11 +452,250 @@ export default function InterviewPage() {
         }
 
         setSubmitting(false);
-    }, [answer, currentQ, difficulty, questions, isRecording, sessionId]);
+    }, [answer, currentQ, difficulty, questions, isRecording, sessionId, integritySessionId]);
 
     if (!loaded) return null;
 
     const q = questions[currentQ];
+
+    // ══════════════════════════════════════════════════════════════
+    // FULLSCREEN GATE OVERLAY
+    // ══════════════════════════════════════════════════════════════
+    if (showFullscreenGate) {
+        return (
+            <div style={{
+                position: "fixed", inset: 0, zIndex: 9999,
+                background: "linear-gradient(135deg, #0a0a12 0%, #1a1a2e 50%, #0d0d1a 100%)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+            }}>
+                <div style={{
+                    textAlign: "center", maxWidth: 480, padding: 48,
+                    background: "rgba(255,255,255,0.03)", borderRadius: 24,
+                    border: "1px solid rgba(255,255,255,0.08)",
+                    backdropFilter: "blur(24px)",
+                }}>
+                    <div style={{
+                        width: 80, height: 80, borderRadius: "50%",
+                        background: "linear-gradient(135deg, #3b82f6, #8b5cf6)",
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        margin: "0 auto 24px", boxShadow: "0 0 40px rgba(59,130,246,0.3)",
+                    }}>
+                        <FiMaximize size={36} color="#fff" />
+                    </div>
+
+                    <h2 style={{ fontSize: "1.5rem", fontWeight: 800, color: "#fff", marginBottom: 12 }}>
+                        Fullscreen Required
+                    </h2>
+                    <p style={{ color: "rgba(255,255,255,0.6)", fontSize: "0.95rem", lineHeight: 1.7, marginBottom: 8 }}>
+                        To ensure interview integrity, you must enter fullscreen mode before proceeding.
+                    </p>
+                    <p style={{ color: "rgba(255,255,255,0.4)", fontSize: "0.82rem", lineHeight: 1.5, marginBottom: 32 }}>
+                        Exiting fullscreen during the interview will be logged as a violation.
+                        Tab switches are limited to <strong style={{ color: "#ef4444" }}>3 strikes</strong> before auto-termination.
+                    </p>
+
+                    <button
+                        onClick={enterFullscreen}
+                        style={{
+                            padding: "14px 40px", borderRadius: 12,
+                            background: "linear-gradient(135deg, #3b82f6, #8b5cf6)",
+                            border: "none", color: "#fff", fontSize: "1rem",
+                            fontWeight: 700, cursor: "pointer",
+                            boxShadow: "0 4px 20px rgba(59,130,246,0.4)",
+                            transition: "transform 0.2s, box-shadow 0.2s",
+                        }}
+                        onMouseOver={(e) => {
+                            e.currentTarget.style.transform = "translateY(-2px)";
+                            e.currentTarget.style.boxShadow = "0 8px 30px rgba(59,130,246,0.5)";
+                        }}
+                        onMouseOut={(e) => {
+                            e.currentTarget.style.transform = "translateY(0)";
+                            e.currentTarget.style.boxShadow = "0 4px 20px rgba(59,130,246,0.4)";
+                        }}
+                    >
+                        <FiMaximize size={16} style={{ marginRight: 8, verticalAlign: "middle" }} />
+                        Enter Fullscreen & Begin
+                    </button>
+
+                    <div style={{ marginTop: 24, display: "flex", justifyContent: "center", gap: 24 }}>
+                        {[
+                            { icon: FiShield, label: "Proctored" },
+                            { icon: FiEye, label: "Gaze Tracked" },
+                            { icon: FiMonitor, label: "Tab Monitored" },
+                        ].map((item) => (
+                            <div key={item.label} style={{ display: "flex", alignItems: "center", gap: 6, color: "rgba(255,255,255,0.35)", fontSize: "0.72rem" }}>
+                                <item.icon size={12} />
+                                <span>{item.label}</span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // FULLSCREEN RESTORE OVERLAY
+    // ══════════════════════════════════════════════════════════════
+    if (showFullscreenRestore) {
+        return (
+            <div style={{
+                position: "fixed", inset: 0, zIndex: 9998,
+                background: "rgba(0,0,0,0.92)", backdropFilter: "blur(12px)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+            }}>
+                <div style={{
+                    textAlign: "center", maxWidth: 440, padding: 40,
+                    background: "rgba(239,68,68,0.05)", borderRadius: 20,
+                    border: "1px solid rgba(239,68,68,0.2)",
+                }}>
+                    <FiAlertTriangle size={48} style={{ color: "#ef4444", marginBottom: 20 }} />
+                    <h2 style={{ fontSize: "1.3rem", fontWeight: 800, color: "#fff", marginBottom: 10 }}>
+                        Fullscreen Exited
+                    </h2>
+                    <p style={{ color: "rgba(255,255,255,0.6)", fontSize: "0.9rem", marginBottom: 24 }}>
+                        You must return to fullscreen to continue the interview.
+                        This violation has been recorded.
+                    </p>
+                    <button
+                        onClick={enterFullscreen}
+                        style={{
+                            padding: "12px 32px", borderRadius: 10,
+                            background: "linear-gradient(135deg, #ef4444, #dc2626)",
+                            border: "none", color: "#fff", fontSize: "0.95rem",
+                            fontWeight: 700, cursor: "pointer",
+                        }}
+                    >
+                        <FiMaximize size={14} style={{ marginRight: 8, verticalAlign: "middle" }} />
+                        Re-enter Fullscreen
+                    </button>
+                </div>
+            </div>
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // TERMINATION OVERLAY (3.5s countdown, NO dismiss)
+    // ══════════════════════════════════════════════════════════════
+    if (showTerminationOverlay) {
+        return (
+            <div style={{
+                position: "fixed", inset: 0, zIndex: 9999,
+                background: "rgba(0,0,0,0.95)", backdropFilter: "blur(16px)",
+                display: "flex", alignItems: "center", justifyContent: "center",
+            }}>
+                <div style={{
+                    textAlign: "center", maxWidth: 500, padding: 48,
+                    background: "rgba(239,68,68,0.06)", borderRadius: 24,
+                    border: "2px solid rgba(239,68,68,0.3)",
+                }}>
+                    <div style={{
+                        width: 90, height: 90, borderRadius: "50%",
+                        background: "rgba(239,68,68,0.15)",
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        margin: "0 auto 24px",
+                        border: "3px solid #ef4444",
+                        animation: "pulse 1s ease-in-out infinite",
+                    }}>
+                        <FiAlertTriangle size={40} color="#ef4444" />
+                    </div>
+
+                    <h2 style={{ fontSize: "1.6rem", fontWeight: 800, color: "#ef4444", marginBottom: 12 }}>
+                        Interview Terminated
+                    </h2>
+                    <p style={{ color: "rgba(255,255,255,0.7)", fontSize: "1rem", marginBottom: 8 }}>
+                        You have exceeded the maximum of <strong>{MAX_STRIKES} tab switches</strong>.
+                    </p>
+                    <p style={{ color: "rgba(255,255,255,0.5)", fontSize: "0.85rem", marginBottom: 28 }}>
+                        This session is being terminated for integrity violations.
+                    </p>
+
+                    {/* Strike dots — all red */}
+                    <div style={{ display: "flex", justifyContent: "center", gap: 12, marginBottom: 28 }}>
+                        {Array.from({ length: MAX_STRIKES }).map((_, i) => (
+                            <div key={i} style={{
+                                width: 20, height: 20, borderRadius: "50%",
+                                background: "#ef4444",
+                                boxShadow: "0 0 12px rgba(239,68,68,0.6)",
+                            }} />
+                        ))}
+                    </div>
+
+                    <div style={{
+                        fontSize: "2.5rem", fontWeight: 800, color: "#ef4444",
+                        fontFamily: "var(--font-mono)",
+                    }}>
+                        {terminationCountdown.toFixed(1)}s
+                    </div>
+                    <p style={{ color: "rgba(255,255,255,0.4)", fontSize: "0.78rem", marginTop: 8 }}>
+                        Redirecting to report...
+                    </p>
+                </div>
+            </div>
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // WARNING OVERLAY (dismissible)
+    // ══════════════════════════════════════════════════════════════
+    const warningOverlay = showWarningOverlay ? (
+        <div style={{
+            position: "fixed", inset: 0, zIndex: 9997,
+            background: "rgba(0,0,0,0.85)", backdropFilter: "blur(8px)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+        }}>
+            <div style={{
+                textAlign: "center", maxWidth: 460, padding: 40,
+                background: "rgba(245,158,11,0.06)", borderRadius: 20,
+                border: "1px solid rgba(245,158,11,0.25)",
+            }}>
+                <FiAlertTriangle size={40} style={{ color: "#f59e0b", marginBottom: 16 }} />
+
+                <h2 style={{ fontSize: "1.3rem", fontWeight: 800, color: "#fff", marginBottom: 10 }}>
+                    Tab Switch Detected!
+                </h2>
+
+                <p style={{ color: "rgba(255,255,255,0.6)", fontSize: "0.92rem", marginBottom: 6 }}>
+                    Strike <strong style={{ color: "#f59e0b" }}>{strikes}</strong> of <strong>{MAX_STRIKES}</strong>
+                </p>
+
+                {lastSwitchTime && (
+                    <p style={{ color: "rgba(255,255,255,0.4)", fontSize: "0.82rem", marginBottom: 4 }}>
+                        Detected at {lastSwitchTime} • Question {lastSwitchQuestion}
+                    </p>
+                )}
+
+                <p style={{ color: "rgba(255,255,255,0.5)", fontSize: "0.82rem", marginBottom: 24 }}>
+                    {MAX_STRIKES - strikes} switch{MAX_STRIKES - strikes !== 1 ? "es" : ""} remaining before auto-termination.
+                </p>
+
+                {/* Strike dots */}
+                <div style={{ display: "flex", justifyContent: "center", gap: 12, marginBottom: 28 }}>
+                    {Array.from({ length: MAX_STRIKES }).map((_, i) => (
+                        <div key={i} style={{
+                            width: 18, height: 18, borderRadius: "50%",
+                            background: i < strikes ? "#ef4444" : "rgba(255,255,255,0.15)",
+                            border: i < strikes ? "2px solid #ef4444" : "2px solid rgba(255,255,255,0.2)",
+                            boxShadow: i < strikes ? "0 0 10px rgba(239,68,68,0.5)" : "none",
+                            transition: "all 0.3s ease",
+                        }} />
+                    ))}
+                </div>
+
+                <button
+                    onClick={() => setShowWarningOverlay(false)}
+                    style={{
+                        padding: "12px 32px", borderRadius: 10,
+                        background: "linear-gradient(135deg, #f59e0b, #d97706)",
+                        border: "none", color: "#000", fontSize: "0.9rem",
+                        fontWeight: 700, cursor: "pointer",
+                    }}
+                >
+                    I Understand — Continue
+                </button>
+            </div>
+        </div>
+    ) : null;
 
     if (showResults) {
         const totalScore = Object.values(scores);
@@ -308,29 +703,89 @@ export default function InterviewPage() {
 
         return (
             <div style={{ minHeight: "100vh", background: "var(--bg-primary)", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                <div className="glass-card animate-fade-in-up" style={{ maxWidth: 600, width: "100%", padding: 40, textAlign: "center" }}>
-                    <div style={{ width: 80, height: 80, borderRadius: "50%", background: "var(--gradient-primary)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px" }}>
-                        <FiCheckCircle size={36} color="#fff" />
+                <div className="glass-card animate-fade-in-up" style={{ maxWidth: 680, width: "100%", padding: 40, textAlign: "center" }}>
+                    <div style={{ width: 80, height: 80, borderRadius: "50%", background: strikes >= MAX_STRIKES ? "linear-gradient(135deg, #ef4444, #dc2626)" : "var(--gradient-primary)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px" }}>
+                        {strikes >= MAX_STRIKES
+                            ? <FiAlertTriangle size={36} color="#fff" />
+                            : <FiCheckCircle size={36} color="#fff" />
+                        }
                     </div>
-                    <h2 style={{ fontSize: "1.6rem", fontWeight: 800, marginBottom: 8 }}>Interview Complete!</h2>
+                    <h2 style={{ fontSize: "1.6rem", fontWeight: 800, marginBottom: 8 }}>
+                        {strikes >= MAX_STRIKES ? "Interview Terminated" : "Interview Complete!"}
+                    </h2>
                     <p style={{ color: "var(--text-secondary)", marginBottom: 28 }}>
-                        {candidateName ? `Great work, ${candidateName}!` : "Here's your session summary"}
+                        {strikes >= MAX_STRIKES
+                            ? `Session terminated after ${MAX_STRIKES} tab switch violations.`
+                            : candidateName ? `Great work, ${candidateName}!` : "Here's your session summary"
+                        }
                     </p>
 
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16, marginBottom: 28 }}>
-                        <div className="glass-card" style={{ padding: 16 }}>
-                            <div style={{ fontSize: "1.5rem", fontWeight: 800, color: "var(--accent-blue)" }}>{avg}%</div>
-                            <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>Overall Score</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 12, marginBottom: 28 }}>
+                        <div className="glass-card" style={{ padding: 14 }}>
+                            <div style={{ fontSize: "1.4rem", fontWeight: 800, color: "var(--accent-blue)" }}>{avg}%</div>
+                            <div style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>Score</div>
                         </div>
-                        <div className="glass-card" style={{ padding: 16 }}>
-                            <div style={{ fontSize: "1.5rem", fontWeight: 800, color: "var(--accent-cyan)" }}>{Object.keys(submitted).length}</div>
-                            <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>Answered</div>
+                        <div className="glass-card" style={{ padding: 14 }}>
+                            <div style={{ fontSize: "1.4rem", fontWeight: 800, color: "var(--accent-cyan)" }}>{Object.keys(submitted).length}</div>
+                            <div style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>Answered</div>
                         </div>
-                        <div className="glass-card" style={{ padding: 16 }}>
-                            <div style={{ fontSize: "1.5rem", fontWeight: 800, color: integrityScore >= 70 ? "var(--accent-green)" : "var(--accent-red)" }}>{integrityScore}%</div>
-                            <div style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>Integrity</div>
+                        <div className="glass-card" style={{ padding: 14 }}>
+                            <div style={{ fontSize: "1.4rem", fontWeight: 800, color: integrityScore >= 70 ? "var(--accent-green)" : "var(--accent-red)" }}>{integrityScore}%</div>
+                            <div style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>Integrity</div>
+                        </div>
+                        <div className="glass-card" style={{ padding: 14 }}>
+                            <div style={{ fontSize: "1.4rem", fontWeight: 800, color: strikes > 0 ? "var(--accent-red)" : "var(--accent-green)" }}>{strikes}</div>
+                            <div style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>Strikes</div>
                         </div>
                     </div>
+
+                    {/* Violation Log Table */}
+                    {focusLogRef.current.filter(e => e.event === "TAB_HIDDEN").length > 0 && (
+                        <div style={{ textAlign: "left", marginBottom: 24 }}>
+                            <h3 style={{ fontSize: "0.82rem", fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 }}>
+                                Violation Log
+                            </h3>
+                            <div style={{ borderRadius: 10, overflow: "hidden", border: "1px solid var(--border-glass)" }}>
+                                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.8rem" }}>
+                                    <thead>
+                                        <tr style={{ background: "rgba(255,255,255,0.03)" }}>
+                                            <th style={{ padding: "8px 12px", textAlign: "left", color: "var(--text-muted)", fontWeight: 600 }}>#</th>
+                                            <th style={{ padding: "8px 12px", textAlign: "left", color: "var(--text-muted)", fontWeight: 600 }}>Time</th>
+                                            <th style={{ padding: "8px 12px", textAlign: "left", color: "var(--text-muted)", fontWeight: 600 }}>Question</th>
+                                            <th style={{ padding: "8px 12px", textAlign: "left", color: "var(--text-muted)", fontWeight: 600 }}>Severity</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {focusLogRef.current
+                                            .filter(e => e.event === "TAB_HIDDEN")
+                                            .map((e, i) => {
+                                                const severity = (i + 1) === 1 ? "MEDIUM" : (i + 1) === 2 ? "HIGH" : "CRITICAL";
+                                                const sevColor = severity === "MEDIUM" ? "#f59e0b" : severity === "HIGH" ? "#f97316" : "#ef4444";
+                                                return (
+                                                    <tr key={i} style={{ borderTop: "1px solid var(--border-glass)" }}>
+                                                        <td style={{ padding: "8px 12px", color: "var(--text-secondary)" }}>{i + 1}</td>
+                                                        <td style={{ padding: "8px 12px", color: "var(--text-secondary)", fontFamily: "var(--font-mono)" }}>
+                                                            {new Date(e.ts).toLocaleTimeString()}
+                                                        </td>
+                                                        <td style={{ padding: "8px 12px", color: "var(--text-secondary)" }}>
+                                                            Q{(e.questionIndex ?? 0) + 1}
+                                                        </td>
+                                                        <td style={{ padding: "8px 12px" }}>
+                                                            <span style={{
+                                                                padding: "2px 8px", borderRadius: 6, fontSize: "0.7rem",
+                                                                fontWeight: 700, background: `${sevColor}20`, color: sevColor,
+                                                            }}>
+                                                                {severity}
+                                                            </span>
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
 
                     <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
                         <Link href={`/report/${sessionId || "latest"}`} className="btn-primary"><FiChevronRight size={16} /> View Full Report</Link>
@@ -347,6 +802,9 @@ export default function InterviewPage() {
 
     return (
         <div style={{ minHeight: "100vh", background: "var(--bg-primary)", display: "flex", flexDirection: "column" }}>
+            {/* Warning overlay */}
+            {warningOverlay}
+
             {/* Hidden webcam video element for frame capture */}
             <video ref={videoRef} autoPlay muted playsInline style={{ display: "none" }} />
 
@@ -368,6 +826,22 @@ export default function InterviewPage() {
                     )}
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+                    {/* Strike dots in top bar */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginRight: 4 }}>
+                        {Array.from({ length: MAX_STRIKES }).map((_, i) => (
+                            <div
+                                key={i}
+                                title={`Strike ${i + 1}${i < strikes ? " — triggered" : ""}`}
+                                style={{
+                                    width: 10, height: 10, borderRadius: "50%",
+                                    background: i < strikes ? "#ef4444" : "rgba(255,255,255,0.15)",
+                                    border: i < strikes ? "1px solid #ef4444" : "1px solid rgba(255,255,255,0.1)",
+                                    boxShadow: i < strikes ? "0 0 6px rgba(239,68,68,0.5)" : "none",
+                                    transition: "all 0.3s ease",
+                                }}
+                            />
+                        ))}
+                    </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 6, color: timeLeft < 300 ? "var(--accent-red)" : "var(--text-secondary)", fontFamily: "var(--font-mono)", fontSize: "0.9rem", fontWeight: 600 }}>
                         <FiClock size={16} /> {formatTime(timeLeft)}
                     </div>
@@ -498,6 +972,54 @@ export default function InterviewPage() {
                         <div style={{ fontSize: "0.72rem", color: "var(--text-muted)", marginTop: 2 }}>Integrity Score</div>
                     </div>
 
+                    {/* Tab Switches with Strike Dots */}
+                    <div className="glass-card" style={{ padding: 14, marginBottom: 10 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                            <FiMonitor size={14} style={{ color: "var(--accent-orange)" }} />
+                            <span style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--text-secondary)" }}>Tab Focus</span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                            {strikes > 0 ? <FiAlertTriangle size={14} style={{ color: "var(--accent-red)" }} /> : <FiCheckCircle size={14} style={{ color: "var(--accent-green)" }} />}
+                            <span style={{ fontSize: "0.82rem", fontWeight: 600, color: strikes > 0 ? "var(--accent-red)" : "var(--text-secondary)" }}>
+                                {tabSwitches} switches
+                            </span>
+                        </div>
+                        {/* Strike dots */}
+                        <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+                            {Array.from({ length: MAX_STRIKES }).map((_, i) => (
+                                <div key={i} style={{
+                                    width: 14, height: 14, borderRadius: "50%",
+                                    background: i < strikes ? "#ef4444" : "rgba(255,255,255,0.1)",
+                                    border: i < strikes ? "2px solid #ef4444" : "2px solid rgba(255,255,255,0.15)",
+                                    boxShadow: i < strikes ? "0 0 8px rgba(239,68,68,0.5)" : "none",
+                                    transition: "all 0.3s ease",
+                                }} title={`Strike ${i + 1}`} />
+                            ))}
+                            <span style={{ fontSize: "0.68rem", color: "var(--text-muted)", marginLeft: 4 }}>
+                                {MAX_STRIKES - strikes} left
+                            </span>
+                        </div>
+                    </div>
+
+                    {/* Fullscreen Compliance */}
+                    <div className="glass-card" style={{ padding: 14, marginBottom: 10 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                            <FiMaximize size={14} style={{ color: isFullscreen ? "var(--accent-green)" : "var(--accent-red)" }} />
+                            <span style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--text-secondary)" }}>Fullscreen</span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            <span className={`status-dot ${isFullscreen ? "active" : "danger"}`} />
+                            <span style={{ fontSize: "0.78rem", color: isFullscreen ? "var(--accent-green)" : "var(--accent-red)" }}>
+                                {isFullscreen ? "Active" : "Exited"}
+                            </span>
+                            {fullscreenExits > 0 && (
+                                <span style={{ fontSize: "0.68rem", color: "var(--accent-red)", marginLeft: "auto" }}>
+                                    {fullscreenExits} exit{fullscreenExits !== 1 ? "s" : ""}
+                                </span>
+                            )}
+                        </div>
+                    </div>
+
                     {/* Gaze */}
                     <div className="glass-card" style={{ padding: 14, marginBottom: 10 }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
@@ -521,20 +1043,6 @@ export default function InterviewPage() {
                         <span className={`badge ${emotion === "Fearful" ? "badge-red" : emotion === "Happy" ? "badge-green" : "badge-blue"}`}>
                             {emotion}
                         </span>
-                    </div>
-
-                    {/* Tab Switches */}
-                    <div className="glass-card" style={{ padding: 14, marginBottom: 10 }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                            <FiMonitor size={14} style={{ color: "var(--accent-orange)" }} />
-                            <span style={{ fontSize: "0.78rem", fontWeight: 600, color: "var(--text-secondary)" }}>Tab Focus</span>
-                        </div>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                            {tabSwitches > 3 ? <FiAlertTriangle size={14} style={{ color: "var(--accent-red)" }} /> : <FiCheckCircle size={14} style={{ color: "var(--accent-green)" }} />}
-                            <span style={{ fontSize: "0.82rem", fontWeight: 600, color: tabSwitches > 3 ? "var(--accent-red)" : "var(--text-secondary)" }}>
-                                {tabSwitches} switches
-                            </span>
-                        </div>
                     </div>
 
                     {/* Face Verify */}

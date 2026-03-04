@@ -133,14 +133,48 @@ test("FaceVerifier init", test_face)
 
 # ── 7. GAZE TRACKING (no camera) ─────────────────────────────────
 print("\n" + "=" * 60)
-print("7. GAZE TRACKING")
+print("7. GAZE TRACKING (MediaPipe + YOLO)")
 print("=" * 60)
 
-def test_gaze():
-    from gaze_tracker import run_gaze_tracking
-    assert run_gaze_tracking is not None
+def test_gaze_init():
+    from gaze_tracker import GazeTracker
+    t = GazeTracker()
+    assert t.frame_count == 0
+    assert t.flag_log == []
+    assert t.gaze_log == []
+    assert t.blink_timestamps == []
 
-test("GazeTracking import + init", test_gaze)
+def test_gaze_analyze_frame():
+    import numpy as np
+    from gaze_tracker import GazeTracker
+    t = GazeTracker()
+    # Black frame — no face should be detected
+    dummy = np.zeros((480, 640, 3), dtype=np.uint8)
+    result = t.analyze_frame(dummy)
+    assert "gaze_direction" in result
+    assert "head_pose" in result
+    assert "blinks_per_min" in result
+    assert "person_count" in result
+    assert "alerts" in result
+    assert isinstance(result["alerts"], list)
+
+def test_gaze_build_report():
+    from gaze_tracker import GazeTracker
+    t = GazeTracker()
+    # Simulate some state
+    t.frame_count = 100
+    t.total_off_screen_frames = 25
+    report = t.build_report()
+    assert "off_screen_pct" in report
+    assert "blinks_per_min" in report
+    assert "severity_counts" in report
+    assert "integrity_flag" in report
+    assert report["total_frames"] == 100
+    assert report["off_screen_pct"] == 25.0
+
+test("GazeTracker init", test_gaze_init)
+test("GazeTracker.analyze_frame (dummy frame)", test_gaze_analyze_frame)
+test("GazeTracker.build_report (simulated)", test_gaze_build_report)
 
 # ── 8. PERSON DETECTION (no camera) ──────────────────────────────
 print("\n" + "=" * 60)

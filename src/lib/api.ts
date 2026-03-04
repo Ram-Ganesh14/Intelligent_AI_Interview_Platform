@@ -1,4 +1,6 @@
 export const API = "http://localhost:8000";
+export const INTEGRITY_API = "http://localhost:8001";
+const INTEGRITY_KEY = "neuralhire-secret-key";
 
 export async function startSession(): Promise<string> {
     const res = await fetch(`${API}/api/start-session`, { method: "POST" });
@@ -67,4 +69,59 @@ export async function detectContradictions(sessionId: string) {
         body: JSON.stringify({ session_id: sessionId }),
     });
     return res.json();
+}
+
+// ── Integrity Service (port 8001) ──────────────────────────────
+
+export async function startIntegritySession(candidateId: string, candidateName?: string, role?: string) {
+    const res = await fetch(`${INTEGRITY_API}/sessions/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": INTEGRITY_KEY },
+        body: JSON.stringify({ candidate_id: candidateId, candidate_name: candidateName, role }),
+    });
+    return res.json();
+}
+
+export async function logIntegrityEvent(
+    sessionId: string,
+    eventType: "tab_switch" | "fullscreen_exit" | "fullscreen_restore" | "focus_loss",
+    elapsedSeconds: number,
+    questionIndex: number,
+    meta?: Record<string, unknown>
+) {
+    try {
+        const res = await fetch(`${INTEGRITY_API}/events/log`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "x-api-key": INTEGRITY_KEY },
+            body: JSON.stringify({
+                session_id: sessionId,
+                event_type: eventType,
+                elapsed_seconds: elapsedSeconds,
+                question_index: questionIndex,
+                meta,
+            }),
+        });
+        return res.json();
+    } catch {
+        return null; // non-fatal — integrity logging should not break the interview
+    }
+}
+
+export async function getIntegrityReport(sessionId: string) {
+    const res = await fetch(`${INTEGRITY_API}/sessions/${sessionId}/report`, {
+        headers: { "x-api-key": INTEGRITY_KEY },
+    });
+    return res.json();
+}
+
+export async function endIntegritySession(sessionId: string) {
+    try {
+        const res = await fetch(`${INTEGRITY_API}/sessions/${sessionId}/end`, {
+            method: "POST",
+            headers: { "x-api-key": INTEGRITY_KEY },
+        });
+        return res.json();
+    } catch {
+        return null;
+    }
 }

@@ -7,8 +7,9 @@ import {
     FiZap, FiBarChart2, FiCheckCircle, FiAlertTriangle, FiDownload,
     FiArrowLeft, FiShield, FiEye, FiSmile, FiMonitor, FiCode,
     FiMessageSquare, FiMic, FiTarget, FiTrendingUp, FiUser, FiLoader,
+    FiMaximize,
 } from "react-icons/fi";
-import { getSession } from "@/lib/api";
+import { getSession, getIntegrityReport } from "@/lib/api";
 
 function getScoreColor(s: number) {
     if (s >= 80) return "var(--accent-green)";
@@ -16,22 +17,37 @@ function getScoreColor(s: number) {
     return "var(--accent-red)";
 }
 
+function getSeverityColor(sev: string) {
+    if (sev === "CRITICAL") return "#ef4444";
+    if (sev === "HIGH") return "#f97316";
+    if (sev === "MEDIUM") return "#f59e0b";
+    return "#6b7280";
+}
+
 export default function ReportPage() {
     const params = useParams();
     const [report, setReport] = useState<any>(null);
+    const [integrityData, setIntegrityData] = useState<any>(null);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
         if (!params.id) return;
-        getSession(params.id as string)
-            .then(data => {
-                if (data.detail) {
-                    setReport(null);
-                } else {
-                    setReport(data);
-                }
-            })
-            .catch(() => setReport(null))
+
+        const sessionId = params.id as string;
+        const integritySessionId = typeof window !== "undefined"
+            ? sessionStorage.getItem("integritySessionId") || sessionId
+            : sessionId;
+
+        Promise.all([
+            getSession(sessionId).catch(() => null),
+            getIntegrityReport(integritySessionId).catch(() => null),
+        ]).then(([sessionData, intData]) => {
+            if (sessionData?.detail) setReport(null);
+            else setReport(sessionData);
+
+            if (intData?.detail) setIntegrityData(null);
+            else setIntegrityData(intData);
+        })
             .finally(() => setLoading(false));
     }, [params.id]);
 
@@ -71,10 +87,17 @@ export default function ReportPage() {
     const aiFlaggedCount = summary.ai_flagged_answers || 0;
     const skillScores = summary.skill_scores || {};
 
-    // Compute integrity score
-    const integrityScore = Math.max(0, 100 - (identityMismatches * 15) - (multiFaceIncidents * 10) - (aiFlaggedCount * 20));
+    // Integrity score — use integrity service data if available, else compute locally
+    const integrityScore = integrityData?.integrity_score
+        ?? Math.max(0, 100 - (identityMismatches * 15) - (multiFaceIncidents * 10) - (aiFlaggedCount * 20));
 
-    // Build dimensions from skill scores
+    const intTabSwitches = integrityData?.tab_switches ?? 0;
+    const intFocusLosses = integrityData?.focus_losses ?? 0;
+    const intFullscreenExits = integrityData?.fullscreen_exits ?? 0;
+    const intEvents = integrityData?.events ?? [];
+    const intStatus = integrityData?.status ?? "completed";
+    const intTerminatedReason = integrityData?.terminated_reason ?? null;
+
     const dimensions = Object.entries(skillScores).map(([name, score]: [string, any]) => ({
         name: name.charAt(0).toUpperCase() + name.slice(1),
         score: Math.round(score * 10),
@@ -91,6 +114,11 @@ export default function ReportPage() {
                     </Link>
                     <span style={{ color: "var(--text-muted)" }}>|</span>
                     <span style={{ fontWeight: 700, fontSize: "0.95rem" }}>Interview Report</span>
+                    {intStatus === "terminated" && (
+                        <span style={{ padding: "3px 10px", borderRadius: 6, fontSize: "0.7rem", fontWeight: 700, background: "rgba(239,68,68,0.15)", color: "#ef4444" }}>
+                            TERMINATED
+                        </span>
+                    )}
                 </div>
                 <button className="btn-secondary btn-sm"><FiDownload size={14} /> Export PDF</button>
             </nav>
@@ -124,6 +152,21 @@ export default function ReportPage() {
                         </div>
                     </div>
                 </div>
+
+                {/* Terminated Banner */}
+                {intStatus === "terminated" && (
+                    <div className="glass-card" style={{ padding: 20, marginBottom: 24, borderLeft: "4px solid #ef4444", background: "rgba(239,68,68,0.04)" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                            <FiAlertTriangle size={20} style={{ color: "#ef4444" }} />
+                            <div>
+                                <div style={{ fontSize: "0.95rem", fontWeight: 700, color: "#ef4444" }}>Session Terminated</div>
+                                <div style={{ fontSize: "0.82rem", color: "var(--text-secondary)" }}>
+                                    {intTerminatedReason || "Exceeded maximum tab switch violations."}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                )}
 
                 {/* Skill Scores */}
                 {dimensions.length > 0 && (
@@ -175,8 +218,11 @@ export default function ReportPage() {
                         <FiShield size={18} style={{ color: "var(--accent-purple)" }} />
                         Proctoring &amp; Integrity Report
                     </h2>
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12 }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12 }}>
                         {[
+                            { icon: FiMonitor, label: "Tab Switches", value: intTabSwitches.toString(), color: intTabSwitches > 0 ? "var(--accent-red)" : "var(--accent-green)" },
+                            { icon: FiEye, label: "Focus Losses", value: intFocusLosses.toString(), color: intFocusLosses > 0 ? "var(--accent-orange)" : "var(--accent-green)" },
+                            { icon: FiMaximize, label: "Fullscreen Exits", value: intFullscreenExits.toString(), color: intFullscreenExits > 0 ? "var(--accent-red)" : "var(--accent-green)" },
                             { icon: FiSmile, label: "Stress Level", value: `${stressPct}%`, color: stressPct > 30 ? "var(--accent-red)" : "var(--accent-green)" },
                             { icon: FiUser, label: "Identity Mismatches", value: identityMismatches.toString(), color: identityMismatches > 0 ? "var(--accent-red)" : "var(--accent-green)" },
                             { icon: FiShield, label: "AI Detection Flags", value: aiFlaggedCount.toString(), color: aiFlaggedCount > 0 ? "var(--accent-red)" : "var(--accent-green)" },
@@ -210,6 +256,81 @@ export default function ReportPage() {
                         </div>
                     )}
                 </div>
+
+                {/* ── Tab & Fullscreen Violation Log ── */}
+                {intEvents.length > 0 && (
+                    <div className="glass-card" style={{ padding: 24, marginBottom: 24, borderLeft: "3px solid var(--accent-orange)" }}>
+                        <h2 style={{ fontSize: "1.1rem", fontWeight: 700, marginBottom: 18, display: "flex", alignItems: "center", gap: 8 }}>
+                            <FiMonitor size={18} style={{ color: "var(--accent-orange)" }} />
+                            Tab &amp; Fullscreen Violations
+                        </h2>
+
+                        <div style={{ borderRadius: 10, overflow: "hidden", border: "1px solid var(--border-glass)" }}>
+                            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.82rem" }}>
+                                <thead>
+                                    <tr style={{ background: "rgba(255,255,255,0.03)" }}>
+                                        <th style={{ padding: "10px 14px", textAlign: "left", color: "var(--text-muted)", fontWeight: 600, fontSize: "0.72rem" }}>Event</th>
+                                        <th style={{ padding: "10px 14px", textAlign: "left", color: "var(--text-muted)", fontWeight: 600, fontSize: "0.72rem" }}>Time</th>
+                                        <th style={{ padding: "10px 14px", textAlign: "left", color: "var(--text-muted)", fontWeight: 600, fontSize: "0.72rem" }}>Elapsed</th>
+                                        <th style={{ padding: "10px 14px", textAlign: "left", color: "var(--text-muted)", fontWeight: 600, fontSize: "0.72rem" }}>Question</th>
+                                        <th style={{ padding: "10px 14px", textAlign: "left", color: "var(--text-muted)", fontWeight: 600, fontSize: "0.72rem" }}>Severity</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {intEvents.map((evt: any, i: number) => {
+                                        const sevColor = getSeverityColor(evt.severity);
+                                        const eventLabel = evt.event_type === "tab_switch" ? "Tab Switch"
+                                            : evt.event_type === "fullscreen_exit" ? "Fullscreen Exit"
+                                                : evt.event_type === "focus_loss" ? "Focus Loss"
+                                                    : evt.event_type === "fullscreen_restore" ? "Fullscreen Restore"
+                                                        : evt.event_type;
+
+                                        const timeStr = evt.occurred_at
+                                            ? new Date(evt.occurred_at).toLocaleTimeString()
+                                            : "—";
+
+                                        const elapsedStr = evt.elapsed_seconds != null
+                                            ? `${Math.floor(evt.elapsed_seconds / 60)}m ${evt.elapsed_seconds % 60}s`
+                                            : "—";
+
+                                        return (
+                                            <tr key={i} style={{ borderTop: "1px solid var(--border-glass)" }}>
+                                                <td style={{ padding: "10px 14px", color: "var(--text-secondary)" }}>
+                                                    {eventLabel}
+                                                </td>
+                                                <td style={{ padding: "10px 14px", color: "var(--text-secondary)", fontFamily: "var(--font-mono)", fontSize: "0.78rem" }}>
+                                                    {timeStr}
+                                                </td>
+                                                <td style={{ padding: "10px 14px", color: "var(--text-secondary)", fontFamily: "var(--font-mono)", fontSize: "0.78rem" }}>
+                                                    {elapsedStr}
+                                                </td>
+                                                <td style={{ padding: "10px 14px", color: "var(--text-secondary)" }}>
+                                                    Q{(evt.question_index ?? 0) + 1}
+                                                </td>
+                                                <td style={{ padding: "10px 14px" }}>
+                                                    <span style={{
+                                                        padding: "3px 10px", borderRadius: 6, fontSize: "0.7rem",
+                                                        fontWeight: 700, background: `${sevColor}20`, color: sevColor,
+                                                    }}>
+                                                        {evt.severity}
+                                                    </span>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+
+                        {/* Summary under table */}
+                        <div style={{ display: "flex", gap: 16, marginTop: 14, fontSize: "0.78rem", color: "var(--text-muted)" }}>
+                            <span>Total events: <strong style={{ color: "var(--text-secondary)" }}>{intEvents.length}</strong></span>
+                            {integrityData?.duration_seconds && (
+                                <span>Duration: <strong style={{ color: "var(--text-secondary)" }}>{Math.floor(integrityData.duration_seconds / 60)}m {integrityData.duration_seconds % 60}s</strong></span>
+                            )}
+                        </div>
+                    </div>
+                )}
 
                 {/* Contradictions */}
                 {contradictions.length > 0 && (

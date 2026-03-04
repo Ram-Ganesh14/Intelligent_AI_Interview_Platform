@@ -30,6 +30,7 @@ from contradiction_engine import detect_contradictions
 from emotion_detection import EmotionTracker
 from face_verification import FaceVerifier
 from person_detection import PersonDetector
+from gaze_tracker import GazeTracker
 
 # ── APP SETUP ─────────────────────────────────────────────────────
 app = FastAPI(title="AI Interview Platform", version="1.0.0")
@@ -46,6 +47,7 @@ app.add_middleware(
 sessions: dict[str, dict] = {}
 baselines: dict[str, dict] = {}
 face_verifiers: dict[str, FaceVerifier] = {}
+gaze_trackers: dict[str, GazeTracker] = {}
 
 
 # ── PYDANTIC MODELS ──────────────────────────────────────────────
@@ -258,6 +260,13 @@ def api_analyze_frame(body: AnalyzeFrameRequest):
         "face_distance": None,
         "face_count": 1,
         "alerts": [],
+        # ── Gaze & Face fields ────────────────────────────────────
+        "gaze_direction": "UNDETECTED",
+        "head_pose": {"yaw": 0.0, "pitch": 0.0, "roll": 0.0},
+        "blinks_per_min": 0.0,
+        "blink_flag": False,
+        "face_present": False,
+        "face_centred": False,
     }
 
     # ── EMOTION DETECTION ─────────────────────────────────────────
@@ -297,17 +306,42 @@ def api_analyze_frame(body: AnalyzeFrameRequest):
     except Exception:
         pass
 
-    # ── MULTI-PERSON DETECTION ────────────────────────────────────
+    # ── GAZE TRACKING & FACE ANALYSIS (MediaPipe + YOLO) ─────────
     try:
-        from deepface import DeepFace
-        faces = DeepFace.extract_faces(
-            frame, enforce_detection=False, detector_backend="opencv"
-        )
-        result["face_count"] = len(faces)
-        if len(faces) > 1:
-            result["alerts"].append(f"MULTIPLE_FACES:{len(faces)}")
+        if body.session_id not in gaze_trackers:
+            gaze_trackers[body.session_id] = GazeTracker()
+
+        gaze = gaze_trackers[body.session_id]
+        gaze_result = gaze.analyze_frame(frame)
+
+        result["gaze_direction"] = gaze_result["gaze_direction"]
+        result["head_pose"] = gaze_result["head_pose"]
+        result["blinks_per_min"] = gaze_result["blinks_per_min"]
+        result["blink_flag"] = gaze_result["blink_flag"]
+        result["face_present"] = gaze_result["face_present"]
+        result["face_centred"] = gaze_result["face_centred"]
+        result["face_count"] = gaze_result["person_count"]
+
+        # Merge gaze alerts into result alerts
+        for alert in gaze_result.get("alerts", []):
+            result["alerts"].append(alert["type"])
+
+        if gaze_result["person_count"] > 1:
+            result["alerts"].append(
+                f"MULTIPLE_PERSONS:{gaze_result['person_count']}"
+            )
     except Exception:
-        pass
+        # Fallback: basic multi-person via DeepFace if gaze tracker fails
+        try:
+            from deepface import DeepFace
+            faces = DeepFace.extract_faces(
+                frame, enforce_detection=False, detector_backend="opencv"
+            )
+            result["face_count"] = len(faces)
+            if len(faces) > 1:
+                result["alerts"].append(f"MULTIPLE_FACES:{len(faces)}")
+        except Exception:
+            pass
 
     sessions[body.session_id]["proctoring_events"].append(result)
     return result
@@ -435,8 +469,39 @@ def get_session(session_id: str):
     )
     multi_face_incidents = sum(
         1 for e in proctoring
-        if any(a.startswith("MULTIPLE_FACES") for a in e.get("alerts", []))
+        if any(
+            (a.startswith("MULTIPLE_FACES") if isinstance(a, str) else False)
+            or (a.startswith("MULTIPLE_PERSONS") if isinstance(a, str) else False)
+            for a in e.get("alerts", [])
+        )
     )
+
+    # ── GAZE SUMMARY ─────────────────────────────────────────────
+    gaze_off_count = sum(
+        1 for e in proctoring
+        if e.get("gaze_direction") in (
+            "LOOKING_LEFT", "LOOKING_RIGHT", "LOOKING_UP", "LOOKING_DOWN"
+        )
+    )
+    total_gaze_samples = max(
+        sum(1 for e in proctoring if e.get("gaze_direction")), 1
+    )
+    gaze_off_pct = round(gaze_off_count / total_gaze_samples * 100, 1)
+
+    blink_flags = sum(1 for e in proctoring if e.get("blink_flag"))
+    head_turn_alerts = sum(
+        1 for e in proctoring
+        if any(
+            (a == "HEAD_TURNED" if isinstance(a, str) else False)
+            for a in e.get("alerts", [])
+        )
+    )
+
+    # ── Gaze tracker report (if available) ───────────────────────
+    gaze_report = {}
+    tracker = gaze_trackers.get(session_id)
+    if tracker:
+        gaze_report = tracker.build_report()
 
     skill_scores: dict[str, list] = {}
     for a in answers:
@@ -459,6 +524,11 @@ def get_session(session_id: str):
             "identity_mismatches": identity_mismatches,
             "multi_face_incidents": multi_face_incidents,
             "skill_scores": skill_summary,
+            # ── Gaze & Face Summary ──────────────────────────────
+            "gaze_off_screen_pct": gaze_off_pct,
+            "blink_flag_count": blink_flags,
+            "head_turn_alert_count": head_turn_alerts,
+            "gaze_report": gaze_report,
         },
     }
 

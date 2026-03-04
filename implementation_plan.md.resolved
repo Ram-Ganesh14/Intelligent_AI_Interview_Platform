@@ -1,0 +1,87 @@
+# Gaze Tracker — Full Rewrite with MediaPipe, Head Pose, Blink Analysis & Multi-Person Detection
+
+The existing [gaze_tracker.py](file:///c:/Users/ACER/OneDrive/Documents/GitHub/Intelligent_AI_Interview_Platform/ai-services/gaze_tracker.py) is a simple 108-line script using the [gaze_tracking](file:///c:/Users/ACER/OneDrive/Documents/GitHub/Intelligent_AI_Interview_Platform/ai-services/gaze_tracker.py#15-100) library with basic left/right/center classification. It needs a complete rewrite to match the Feature 1.1 specification: MediaPipe Face Mesh for 468 landmarks, head pose estimation, EAR-based blink analysis, YOLOv8 multi-person detection, and a proper alert/flag system with JSON logging.
+
+## Proposed Changes
+
+### Gaze Tracker Core
+
+#### [MODIFY] [gaze_tracker.py](file:///c:/Users/ACER/OneDrive/Documents/GitHub/Intelligent_AI_Interview_Platform/ai-services/gaze_tracker.py)
+
+Complete rewrite from a bare function to a `GazeTracker` class (matching the project's class-based pattern from [EmotionTracker](file:///c:/Users/ACER/OneDrive/Documents/GitHub/Intelligent_AI_Interview_Platform/ai-services/emotion_detection.py#19-113), [FaceVerifier](file:///c:/Users/ACER/OneDrive/Documents/GitHub/Intelligent_AI_Interview_Platform/ai-services/face_verification.py#15-108), [PersonDetector](file:///c:/Users/ACER/OneDrive/Documents/GitHub/Intelligent_AI_Interview_Platform/ai-services/person_detection.py#14-87)).
+
+**Key features:**
+
+| Feature | Implementation |
+|---|---|
+| **Face Presence** | MediaPipe Face Mesh — check if mesh detected, compute face bounding box vs frame center |
+| **Gaze Direction** | Iris landmarks (468–477) mapped to gaze vector; classify LEFT/RIGHT/UP/DOWN/CENTER |
+| **Head Pose** | `cv2.solvePnP` with 6 canonical 3D face points → pitch/yaw/roll angles |
+| **Blink Analysis** | EAR (Eye Aspect Ratio) per frame; track blinks/min, flag if outside 12–20 range |
+| **Multi-Person** | YOLOv8 (`ultralytics`) on full frame; >1 person = instant alert |
+| **Alert Thresholds** | 3s off-screen → `SOFT_FLAG`; 10s off-screen → `HARD_FLAG` + screenshot |
+| **Output** | JSON flag log: `{timestamp, severity, type, details}` |
+
+**Core methods:**
+- [__init__()](file:///c:/Users/ACER/OneDrive/Documents/GitHub/Intelligent_AI_Interview_Platform/ai-services/emotion_detection.py#22-27) — initialize MediaPipe, YOLO, state trackers
+- [analyze_frame(frame)](file:///c:/Users/ACER/OneDrive/Documents/GitHub/Intelligent_AI_Interview_Platform/ai-services/main.py#242-314) — single-frame analysis returning all detections (called by `/api/analyze-frame`)
+- `_detect_face_presence(landmarks, frame_shape)` — face centered/in-frame check
+- `_estimate_gaze(landmarks)` — iris-based gaze direction
+- `_estimate_head_pose(landmarks, frame_shape)` — yaw/pitch/roll via solvePnP
+- `_compute_ear(landmarks)` — Eye Aspect Ratio for blink detection
+- `_detect_persons(frame)` — YOLOv8 person count
+- [build_report()](file:///c:/Users/ACER/OneDrive/Documents/GitHub/Intelligent_AI_Interview_Platform/ai-services/emotion_detection.py#91-113) — aggregate flags, blink stats, gaze log into final report
+- [run(duration)](file:///c:/Users/ACER/OneDrive/Documents/GitHub/Intelligent_AI_Interview_Platform/ai-services/emotion_detection.py#34-90) — standalone webcam loop (for testing, like other services)
+
+> [!IMPORTANT]
+> The [analyze_frame(frame)](file:///c:/Users/ACER/OneDrive/Documents/GitHub/Intelligent_AI_Interview_Platform/ai-services/main.py#242-314) method is the key integration point — [main.py](file:///c:/Users/ACER/OneDrive/Documents/GitHub/Intelligent_AI_Interview_Platform/ai-services/main.py) sends individual frames from the frontend via base64, so the tracker must work **per-frame** (stateful across calls), not as a standalone webcam loop.
+
+---
+
+### FastAPI Integration
+
+#### [MODIFY] [main.py](file:///c:/Users/ACER/OneDrive/Documents/GitHub/Intelligent_AI_Interview_Platform/ai-services/main.py)
+
+- Import `GazeTracker` and add per-session `gaze_trackers` dict (same pattern as `face_verifiers`)
+- In `/api/analyze-frame`: create/reuse `GazeTracker` per session, call [analyze_frame(frame)](file:///c:/Users/ACER/OneDrive/Documents/GitHub/Intelligent_AI_Interview_Platform/ai-services/main.py#242-314), merge gaze results into the response
+- In `/api/session/{session_id}`: add gaze summary stats to the report
+
+---
+
+### Dependencies
+
+#### [MODIFY] [requirements.txt](file:///c:/Users/ACER/OneDrive/Documents/GitHub/Intelligent_AI_Interview_Platform/ai-services/requirements.txt)
+
+Add:
+```
+mediapipe>=0.10.0
+ultralytics>=8.0.0
+```
+
+Remove `gaze-tracking>=0.0.1` (replaced by MediaPipe).
+
+---
+
+### Tests
+
+#### [MODIFY] [test_all_services.py](file:///c:/Users/ACER/OneDrive/Documents/GitHub/Intelligent_AI_Interview_Platform/ai-services/test_all_services.py)
+
+Update section 7 to test the new `GazeTracker` class instead of the old [run_gaze_tracking](file:///c:/Users/ACER/OneDrive/Documents/GitHub/Intelligent_AI_Interview_Platform/ai-services/gaze_tracker.py#15-100) function:
+- Test class instantiation
+- Test [analyze_frame()](file:///c:/Users/ACER/OneDrive/Documents/GitHub/Intelligent_AI_Interview_Platform/ai-services/main.py#242-314) with a dummy numpy frame (black image)
+- Test [build_report()](file:///c:/Users/ACER/OneDrive/Documents/GitHub/Intelligent_AI_Interview_Platform/ai-services/emotion_detection.py#91-113) on simulated data
+
+## Verification Plan
+
+### Automated Tests
+```bash
+cd c:\Users\ACER\OneDrive\Documents\GitHub\Intelligent_AI_Interview_Platform\ai-services
+python test_all_services.py
+```
+
+### Manual Verification
+1. Verify `python -c "from gaze_tracker import GazeTracker; t = GazeTracker(); print('OK')"` works
+2. Verify the module can process a dummy frame without crashing:
+   ```bash
+   python -c "from gaze_tracker import GazeTracker; import numpy as np; t = GazeTracker(); print(t.analyze_frame(np.zeros((480,640,3), dtype=np.uint8)))"
+   ```

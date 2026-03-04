@@ -4,7 +4,8 @@
 # ── Computer Vision & Face Analysis ──────────────────────────────
 deepface>=0.0.89
 opencv-python>=4.8.0
-gaze-tracking>=0.0.1
+mediapipe>=0.10.0
+ultralytics>=8.0.0
 
 # ── NLP & AI Detection ──────────────────────────────────────────
 transformers>=4.35.0
@@ -19,6 +20,10 @@ nltk>=3.8.0
 # ── LLM API Client ─────────────────────────────────────────────
 anthropic>=0.18.0
 
+# ── Web Framework (Integrity Service) ───────────────────────────
+fastapi>=0.110.0
+uvicorn>=0.27.0
+pydantic>=2.5.0
+
 # ── Utilities ───────────────────────────────────────────────────
 Pillow>=10.0.0
-
